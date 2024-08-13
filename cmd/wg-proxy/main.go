@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"flag"
+	"io"
 	"log"
 	"net"
 	"net/netip"
 	"os"
 	"strings"
+	"sync"
 
 	"go.inndy.tw/wg-proxy/wireguard/conf"
 
@@ -16,6 +18,19 @@ import (
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
+
+var wg sync.WaitGroup
+
+type stringList []string
+
+func (i *stringList) String() string {
+    return strings.Join(*i, ",")
+}
+
+func (i *stringList) Set(value string) error {
+    *i = append(*i, value)
+    return nil
+}
 
 type ResolverShim struct {
 	net.Resolver
@@ -35,13 +50,45 @@ func (r *ResolverShim) Resolve(ctx context.Context, name string) (context.Contex
 	return ctx, ip, err
 }
 
+func connect1(c1, c2 net.Conn) {
+	io.Copy(c1, c2)
+	if tcp1, ok := c1.(*net.TCPConn); ok {
+		tcp1.CloseWrite()
+	}
+	if tcp2, ok := c2.(*net.TCPConn); ok {
+		tcp2.CloseRead()
+	}
+}
+
+func connect2(c1, c2 net.Conn) {
+	ch := make(chan struct{})
+
+	go func() {
+		connect1(c1, c2)
+		ch <- struct{}{}
+	}()
+
+	connect1(c2, c1)
+
+	<-ch
+}
+
 func main() {
-	var configFile, dnsServer, listenOn string
+	var configFile, dnsServer string
+
+	var localForwards, socks5Proxies stringList
 
 	flag.StringVar(&configFile, "config", "wg.conf", "WireGuard config file")
 	flag.StringVar(&dnsServer, "dns", "8.8.8.8:53", "DNS server")
-	flag.StringVar(&listenOn, "listen", "127.0.0.1:1080", "Socks5 server listen on")
+	flag.Var(&localForwards, "L", "Local port forward, like ssh -L")
+	flag.Var(&socks5Proxies, "D", "Socks5 server listen on, like ssh -D")
+	flag.Var(&socks5Proxies, "listen", "Socks5 server listen on")
 	flag.Parse()
+
+	if len(localForwards) == 0 && len(socks5Proxies) == 0 {
+		socks5Proxies = append(socks5Proxies, "127.0.0.1:1080")
+		log.Printf("Enable default socsk5 listener: %s", socks5Proxies[0])
+	}
 
 	configBytes, err := os.ReadFile(configFile)
 	if err != nil {
@@ -65,7 +112,7 @@ func main() {
 		tunAddrs = append(tunAddrs, addr.Addr())
 	}
 
-	tun, tnet, err := netstack.CreateNetTUN(tunAddrs, []netip.Addr{netip.AddrFrom4([4]byte{10, 0, 0, 2})}, 1400)
+	tun, tnet, err := netstack.CreateNetTUN(tunAddrs, []netip.Addr{netip.AddrFrom4([4]byte{1, 1, 1, 1})}, 1400)
 	if err != nil {
 		log.Panicf("netstack.CreateNetTUN: %s", err)
 	}
@@ -101,12 +148,134 @@ func main() {
 			return conn, err
 		},
 	}
-	server, err := socks5.New(conf)
+
+	socks5server, err := socks5.New(conf)
 	if err != nil {
 		panic(err)
 	}
 
-	if err := server.ListenAndServe("tcp", listenOn); err != nil {
-		panic(err)
+	for _, listenOn := range socks5Proxies {
+		listener, err := net.Listen("tcp", listenOn)
+		if err != nil {
+			log.Panicf("Can not listen on %s: %s", err, err)
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			socks5server.Serve(listener)
+		}()
 	}
+
+	for _, forward := range localForwards {
+		protocol := "tcp"
+		if strings.HasPrefix(forward, "udp:") {
+			forward = strings.TrimPrefix(forward,"udp:")
+			protocol = "udp"
+		}
+		args := strings.Split(forward, ":")
+
+		var listenOn, forwardTo string
+
+		switch len(args) {
+		default:
+			log.Panicf("Bad listener %q", forward)
+		case 3:
+			listenOn = "127.0.0.1:" + args[0]
+			forwardTo = args[1] + ":" + args[2]
+		case 4:
+			listenOn = args[0] + ":" + args[1]
+			forwardTo = args[2] + ":" + args[3]
+		}
+
+		if protocol == "tcp" {
+			wg.Add(1)
+			listener, err := net.Listen("tcp", listenOn)
+			if err != nil {
+				log.Panicf("Can not listen on tcp:%s: %s", listenOn, err)
+			}
+
+			go func() {
+				defer wg.Done()
+				for {
+					conn, err := listener.Accept()
+					if err != nil {
+						log.Printf("Accept failed: %s", err)
+						return
+					}
+
+					go func() {
+						defer conn.Close()
+
+						conn2, err := tnet.DialContext(context.Background(), "tcp", forwardTo)
+						if err != nil {
+							log.Printf("Dial %s failed: %s", forwardTo, err)
+							return
+						}
+
+						defer conn2.Close()
+						connect2(conn, conn2)
+					}()
+				}
+			}()
+		} else if protocol == "udp" {
+			wg.Add(1)
+
+			udpForwardTo, err := net.ResolveUDPAddr("udp", forwardTo)
+			if err != nil {
+				log.Panicf("Can not resolve udp addr %s: %s", forwardTo, err)
+			}
+
+			listener, err := net.ListenPacket("udp", listenOn)
+			if err != nil {
+				log.Panicf("Can not listen on udp:%s: %s", listenOn, err)
+			}
+
+			var addrMap sync.Map
+
+			go func() {
+				defer wg.Done()
+				for {
+					var buf [65536]byte
+					n, proxyClientAddr, err := listener.ReadFrom(buf[:])
+					if err != nil {
+						log.Printf("ReadFrom failed: %s", err)
+						return
+					}
+
+					clientAddrKey := proxyClientAddr.(*net.UDPAddr).String()
+					if val, ok := addrMap.Load(clientAddrKey); ok {
+						val.(net.Conn).Write(buf[:n])
+					} else {
+						conn, err := tnet.DialUDP(nil, udpForwardTo)
+						if err != nil {
+							log.Printf("tnet.DialUDP failed: %s", err)
+							continue
+						}
+
+						conn.Write(buf[:n])
+						addrMap.Store(clientAddrKey, conn)
+
+						wg.Add(1)
+						go func() {
+							defer wg.Done()
+							var buf [65536]byte
+
+							for {
+								n, err := conn.Read(buf[:])
+								if err != nil {
+									log.Printf("udp proxy to %s conn.Read() from %s: %s", udpForwardTo, conn.LocalAddr(), err)
+									break
+								}
+
+								listener.WriteTo(buf[:n], proxyClientAddr)
+							}
+						}()
+					}
+				}
+			}()
+		}
+	}
+
+	wg.Wait()
 }
