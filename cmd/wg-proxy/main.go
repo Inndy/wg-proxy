@@ -73,14 +73,39 @@ func connect2(c1, c2 net.Conn) {
 	<-ch
 }
 
+func serveTcpProxy(wg *sync.WaitGroup, listener net.Listener, dial func(string, string) (net.Conn, error), forwardTo string) {
+	defer wg.Done()
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Printf("Accept failed: %s", err)
+			return
+		}
+
+		go func() {
+			defer conn.Close()
+
+			conn2, err := dial("tcp", forwardTo)
+			if err != nil {
+				log.Printf("Dial %s failed: %s", forwardTo, err)
+				return
+			}
+
+			defer conn2.Close()
+			connect2(conn, conn2)
+		}()
+	}
+}
+
 func main() {
 	var configFile, dnsServer string
 
-	var localForwards, socks5Proxies stringList
+	var localForwards, remoteForwards, socks5Proxies stringList
 
 	flag.StringVar(&configFile, "config", "wg.conf", "WireGuard config file")
 	flag.StringVar(&dnsServer, "dns", "8.8.8.8:53", "DNS server")
 	flag.Var(&localForwards, "L", "Local port forward, like ssh -L")
+	flag.Var(&remoteForwards, "R", "Remote port forward, like ssh -R")
 	flag.Var(&socks5Proxies, "D", "Socks5 server listen on, like ssh -D")
 	flag.Var(&socks5Proxies, "listen", "Socks5 server listen on")
 	flag.Parse()
@@ -117,6 +142,12 @@ func main() {
 		log.Panicf("netstack.CreateNetTUN: %s", err)
 	}
 	dev := device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(device.LogLevelError, ""))
+
+	if f := tun.File(); f != nil {
+		log.Printf("tun name: %s", tun.File())
+	} else {
+		log.Printf("tun.File() is nil!")
+	}
 
 	if err := dev.IpcSet(ipc); err != nil {
 		log.Panicf("dev.IpcSet: %s", err)
@@ -167,10 +198,46 @@ func main() {
 		}()
 	}
 
+	for _, forward := range remoteForwards {
+		args := strings.Split(forward, ":")
+
+		var listenOn, forwardTo string
+
+		switch len(args) {
+		default:
+			log.Panicf("Bad listener %q", forward)
+		case 1:
+			listenOn = ":" + args[0]
+			forwardTo = "127.0.0.1:" + args[0]
+		case 2:
+			listenOn = ":" + args[0]
+			forwardTo = "127.0.0.1:" + args[1]
+		case 3:
+			listenOn = ":" + args[0]
+			forwardTo = args[1] + ":" + args[2]
+		case 4:
+			listenOn = args[0] + ":" + args[1]
+			forwardTo = args[2] + ":" + args[3]
+		}
+
+		addr, err := net.ResolveTCPAddr("tcp", listenOn)
+		if err != nil {
+			log.Panicf("Can not resolve TCP address %s: %s", listenOn, err)
+		}
+
+		var listener net.Listener
+		listener, err = tnet.ListenTCP(addr)
+		if err != nil {
+			log.Panicf("Can not listen on tcp:%s: %s", listenOn, err)
+		}
+
+		go serveTcpProxy(&wg, listener, net.Dial, forwardTo)
+	}
+
 	for _, forward := range localForwards {
 		protocol := "tcp"
 		if strings.HasPrefix(forward, "udp:") {
-			forward = strings.TrimPrefix(forward,"udp:")
+			forward = strings.TrimPrefix(forward, "udp:")
 			protocol = "udp"
 		}
 		args := strings.Split(forward, ":")
@@ -195,29 +262,7 @@ func main() {
 				log.Panicf("Can not listen on tcp:%s: %s", listenOn, err)
 			}
 
-			go func() {
-				defer wg.Done()
-				for {
-					conn, err := listener.Accept()
-					if err != nil {
-						log.Printf("Accept failed: %s", err)
-						return
-					}
-
-					go func() {
-						defer conn.Close()
-
-						conn2, err := tnet.DialContext(context.Background(), "tcp", forwardTo)
-						if err != nil {
-							log.Printf("Dial %s failed: %s", forwardTo, err)
-							return
-						}
-
-						defer conn2.Close()
-						connect2(conn, conn2)
-					}()
-				}
-			}()
+			go serveTcpProxy(&wg, listener, tnet.Dial, forwardTo)
 		} else if protocol == "udp" {
 			wg.Add(1)
 
