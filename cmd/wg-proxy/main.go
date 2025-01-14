@@ -24,12 +24,12 @@ var wg sync.WaitGroup
 type stringList []string
 
 func (i *stringList) String() string {
-    return strings.Join(*i, ",")
+	return strings.Join(*i, ",")
 }
 
 func (i *stringList) Set(value string) error {
-    *i = append(*i, value)
-    return nil
+	*i = append(*i, value)
+	return nil
 }
 
 type ResolverShim struct {
