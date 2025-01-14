@@ -143,12 +143,6 @@ func main() {
 	}
 	dev := device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(device.LogLevelError, ""))
 
-	if f := tun.File(); f != nil {
-		log.Printf("tun name: %s", tun.File())
-	} else {
-		log.Printf("tun.File() is nil!")
-	}
-
 	if err := dev.IpcSet(ipc); err != nil {
 		log.Panicf("dev.IpcSet: %s", err)
 	}
