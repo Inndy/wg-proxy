@@ -98,8 +98,13 @@ func serveTcpProxy(wg *sync.WaitGroup, listener net.Listener, dial func(string, 
 }
 
 func main() {
+	if len(os.Args) <= 1 {
+		if args_raw, err := os.ReadFile("wg-proxy.conf"); err == nil {
+			log.Printf("Reading args from wg-proxy.conf")
+			os.Args = append(os.Args, strings.Fields(string(args_raw))...)
+		}
+	}
 	var configFile, dnsServer string
-
 	var localForwards, remoteForwards, socks5Proxies stringList
 
 	flag.StringVar(&configFile, "config", "wg.conf", "WireGuard config file")
