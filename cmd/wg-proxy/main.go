@@ -117,7 +117,7 @@ func main() {
 
 	if len(localForwards) == 0 && len(socks5Proxies) == 0 {
 		socks5Proxies = append(socks5Proxies, "127.0.0.1:1080")
-		log.Printf("Enable default socsk5 listener: %s", socks5Proxies[0])
+		log.Printf("Enable default socks5 listener: %s", socks5Proxies[0])
 	}
 
 	configBytes, err := os.ReadFile(configFile)
