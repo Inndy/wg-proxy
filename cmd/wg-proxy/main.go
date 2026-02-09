@@ -14,7 +14,7 @@ import (
 	"go.inndy.tw/wg-proxy/wireguard/conf"
 
 	"github.com/armon/go-socks5"
-	"golang.zx2c4.com/wireguard/conn"
+	wgConn "golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
@@ -146,7 +146,7 @@ func main() {
 	if err != nil {
 		log.Panicf("netstack.CreateNetTUN: %s", err)
 	}
-	dev := device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(device.LogLevelError, ""))
+	dev := device.NewDevice(tun, wgConn.NewDefaultBind(), device.NewLogger(device.LogLevelError, ""))
 
 	if err := dev.IpcSet(ipc); err != nil {
 		log.Panicf("dev.IpcSet: %s", err)
