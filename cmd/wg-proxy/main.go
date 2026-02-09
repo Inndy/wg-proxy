@@ -35,6 +35,31 @@ func (i *stringList) Set(value string) error {
 	return nil
 }
 
+type LocalhostPolicy int
+
+const (
+	LocalhostPolicyDeny LocalhostPolicy = iota
+	LocalhostPolicyPass
+)
+
+func (p *LocalhostPolicy) String() string {
+	switch *p {
+		case LocalhostPolicyDeny: return "deny"
+		case LocalhostPolicyPass: return "pass"
+		default: return "unknown"
+	}
+}
+
+func (p *LocalhostPolicy) Set(value string) error {
+	switch strings.ToLower(value) {
+	case "deny": *p = LocalhostPolicyDeny
+	case "pass": *p = LocalhostPolicyPass
+	default: return fmt.Errorf("Invalid option for localhost policy: %q", value)
+	}
+
+	return nil
+}
+
 type ResolverShim struct {
 	net.Resolver
 }
@@ -207,6 +232,7 @@ func main() {
 	}
 	var configFile, dnsServer string
 	var localForwards, remoteForwards, socks5Proxies stringList
+	var localhostPolicy LocalhostPolicy
 
 	flag.StringVar(&configFile, "config", "wg.conf", "WireGuard config file")
 	flag.StringVar(&dnsServer, "dns", "8.8.8.8:53", "DNS server")
@@ -214,6 +240,7 @@ func main() {
 	flag.Var(&remoteForwards, "R", "Remote port forward, like ssh -R")
 	flag.Var(&socks5Proxies, "D", "Socks5 server listen on, like ssh -D")
 	flag.Var(&socks5Proxies, "listen", "Socks5 server listen on")
+	flag.Var(&localhostPolicy, "localhost-policy", "Set localhost policy (pass|deny, default = deny)")
 	flag.Parse()
 
 	if len(localForwards) == 0 && len(socks5Proxies) == 0 {
@@ -271,9 +298,16 @@ func main() {
 		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			switch {
 			case strings.HasPrefix(addr, "127.0.0.1:"),
-				 strings.HasPrefix(addr, "0.0.0.0:"),
-				 strings.HasPrefix(addr, "[::1]:"):
-				return nil, os.ErrInvalid
+			     strings.HasPrefix(addr, "0.0.0.0:"),
+			     strings.HasPrefix(addr, "[::1]:"):
+
+				switch localhostPolicy {
+				case LocalhostPolicyPass:
+					return net.Dial(network, addr)
+				case LocalhostPolicyDeny: fallthrough
+				default:
+					return nil, os.ErrInvalid
+				}
 			}
 			conn, err := tnet.DialContext(ctx, network, addr)
 			if err != nil {
