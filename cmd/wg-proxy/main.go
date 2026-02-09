@@ -187,7 +187,7 @@ func main() {
 	for _, listenOn := range socks5Proxies {
 		listener, err := net.Listen("tcp", listenOn)
 		if err != nil {
-			log.Panicf("Can not listen on %s: %s", err, err)
+			log.Panicf("Can not listen on %s: %s", listenOn, err)
 		}
 
 		wg.Add(1)
@@ -204,7 +204,7 @@ func main() {
 
 		switch len(args) {
 		default:
-			log.Panicf("Bad listener %q", forward)
+			log.Panicf("Bad listener %s", forward)
 		case 1:
 			listenOn = ":" + args[0]
 			forwardTo = "127.0.0.1:" + args[0]
@@ -245,7 +245,7 @@ func main() {
 
 		switch len(args) {
 		default:
-			log.Panicf("Bad listener %q", forward)
+			log.Panicf("Bad listener %s", forward)
 		case 3:
 			listenOn = "127.0.0.1:" + args[0]
 			forwardTo = args[1] + ":" + args[2]
