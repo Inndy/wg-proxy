@@ -166,7 +166,10 @@ func main() {
 			},
 		},
 		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if strings.HasPrefix(addr, "127.0.0.1:") {
+			switch {
+			case strings.HasPrefix(addr, "127.0.0.1:"),
+				 strings.HasPrefix(addr, "0.0.0.0:"),
+				 strings.HasPrefix(addr, "[::1]:"):
 				return nil, os.ErrInvalid
 			}
 			conn, err := tnet.DialContext(ctx, network, addr)
