@@ -239,10 +239,11 @@ func main() {
 
 	for _, forward := range localForwards {
 		protocol := "tcp"
-		if strings.HasPrefix(forward, "udp:") {
-			forward = strings.TrimPrefix(forward, "udp:")
+		var isUdp bool
+		if forward, isUdp = strings.CutPrefix(forward, "udp:"); isUdp {
 			protocol = "udp"
 		}
+
 		args := strings.Split(forward, ":")
 
 		var listenOn, forwardTo string
