@@ -230,6 +230,7 @@ func main() {
 			log.Panicf("Can not listen on tcp:%s: %s", listenOn, err)
 		}
 
+		wg.Add(1)
 		go serveTcpProxy(&wg, listener, net.Dial, forwardTo)
 	}
 
@@ -255,16 +256,14 @@ func main() {
 		}
 
 		if protocol == "tcp" {
-			wg.Add(1)
 			listener, err := net.Listen("tcp", listenOn)
 			if err != nil {
 				log.Panicf("Can not listen on tcp:%s: %s", listenOn, err)
 			}
 
+			wg.Add(1)
 			go serveTcpProxy(&wg, listener, tnet.Dial, forwardTo)
 		} else if protocol == "udp" {
-			wg.Add(1)
-
 			udpForwardTo, err := net.ResolveUDPAddr("udp", forwardTo)
 			if err != nil {
 				log.Panicf("Can not resolve udp addr %s: %s", forwardTo, err)
@@ -277,6 +276,7 @@ func main() {
 
 			var addrMap sync.Map
 
+			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				for {
