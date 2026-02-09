@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/netip"
 	"os"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"go.inndy.tw/wg-proxy/wireguard/conf"
 
@@ -97,6 +100,104 @@ func serveTcpProxy(wg *sync.WaitGroup, listener net.Listener, dial func(string, 
 	}
 }
 
+type peerEndpoint struct {
+	publicKey  conf.Key
+	host       string
+	port       uint16
+	resolvedIP net.IP
+}
+
+func nicAddrsSnapshot() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	s := make([]string, len(addrs))
+	for i, a := range addrs {
+		s[i] = a.String()
+	}
+	sort.Strings(s)
+	return strings.Join(s, ",")
+}
+
+func endpointResolver(dev *device.Device, peers []conf.Peer) {
+	var tracked []*peerEndpoint
+	for _, peer := range peers {
+		if peer.Endpoint.IsEmpty() {
+			continue
+		}
+		if net.ParseIP(peer.Endpoint.Host) != nil {
+			continue
+		}
+		ips, err := net.LookupIP(peer.Endpoint.Host)
+		var ip net.IP
+		if err == nil && len(ips) > 0 {
+			ip = ips[0]
+		}
+		tracked = append(tracked, &peerEndpoint{
+			publicKey:  peer.PublicKey,
+			host:       peer.Endpoint.Host,
+			port:       peer.Endpoint.Port,
+			resolvedIP: ip,
+		})
+	}
+
+	if len(tracked) == 0 {
+		return
+	}
+
+	lastNicSnapshot := nicAddrsSnapshot()
+	nicTicker := time.NewTicker(10 * time.Second)
+	dnsTicker := time.NewTicker(1 * time.Minute)
+	defer nicTicker.Stop()
+	defer dnsTicker.Stop()
+
+	reResolve := func(reason string) {
+		L:
+		for _, p := range tracked {
+			ips, err := net.LookupIP(p.host)
+			if err != nil || len(ips) == 0 {
+				log.Printf("endpoint-resolver: failed to resolve %s: %v", p.host, err)
+				continue
+			}
+
+			if p.resolvedIP != nil {
+				for _, ip := range ips {
+					if p.resolvedIP.Equal(ip) {
+						continue L
+					}
+				}
+			}
+
+			newIP := ips[0]
+			log.Printf("endpoint-resolver: [%s] %s endpoint changed: %v -> %v", reason, p.host, p.resolvedIP, newIP)
+			ipcStr := fmt.Sprintf("public_key=%x\nendpoint=%s:%d\n", p.publicKey, newIP, p.port)
+			if err := dev.IpcSet(ipcStr); err != nil {
+				log.Printf("endpoint-resolver: IpcSet failed for %s: %v", p.host, err)
+				continue
+			}
+			p.resolvedIP = newIP
+		}
+	}
+
+	for {
+		select {
+		case <-nicTicker.C:
+			snap := nicAddrsSnapshot()
+			if snap != lastNicSnapshot {
+				log.Printf("endpoint-resolver: NIC addresses changed, re-resolving endpoints")
+				lastNicSnapshot = snap
+				if err := dev.BindUpdate(); err != nil {
+					log.Printf("endpoint-resolver: BindUpdate failed: %v", err)
+				}
+				reResolve("nic-change")
+			}
+		case <-dnsTicker.C:
+			reResolve("periodic")
+		}
+	}
+}
+
 func main() {
 	if len(os.Args) <= 1 {
 		if args_raw, err := os.ReadFile("wg-proxy.conf"); err == nil {
@@ -155,6 +256,8 @@ func main() {
 	if err := dev.Up(); err != nil {
 		log.Panicf("dev.Up: %s", err)
 	}
+
+	go endpointResolver(dev, parsedConf.Peers)
 
 	conf := &socks5.Config{
 		Resolver: &ResolverShim{
